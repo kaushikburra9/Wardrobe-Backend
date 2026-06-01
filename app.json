@@ -1,0 +1,30 @@
+// app.json — replace apiUrl with your deployed backend URL before testing
+{
+  "expo": {
+    "name": "Wardrobe",
+    "slug": "wardrobe-app",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Take photos of yourself and clothing items to see how they look on you."
+      }
+    },
+    "android": {
+      "permissions": ["CAMERA"]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Wardrobe to use your camera."
+        }
+      ]
+    ],
+    "extra": {
+      "apiUrl": "http://localhost:3000"
+    }
+  }
+}
