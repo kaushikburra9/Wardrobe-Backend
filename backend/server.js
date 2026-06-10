@@ -1,15 +1,25 @@
 // backend/server.js
-// Proxies try-on requests to Fashn API v1.6 using QUALITY mode + 2 samples.
-// Quality mode produces noticeably better fabric/fit rendering than balanced.
-// Returning 2 samples gives the user variants to pick from — one of them
-// is usually clearly better, which makes the perceived quality much higher.
+// Mira backend — proxies all FASHN calls so the API key never touches the phone.
+//
+// Pipelines:
+//   /api/tryon        → tryon-max (personal render: your body + the garment)
+//   /api/face-tryon   → product-to-model + face_reference (no body photo yet)
+//   /api/mannequin    → tryon-max against a fixed neutral model image
+//                       (uniform faceless catalog renders for the closet grid)
+//   /api/model-photo  → reframe (normalize the body photo to 2:3, done ONCE
+//                       when the user saves their model photo — not per try-on)
+//
+// All FASHN models are async: POST /v1/run → { id } → poll /v1/status/:id.
+// tryon-max can take up to 120s, so we poll generously.
 
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 const FASHN_API = 'https://api.fashn.ai/v1';
 const API_KEY = process.env.FASHN_API_KEY;
@@ -28,30 +38,39 @@ const fashn = axios.create({
   timeout: 45_000,
 });
 
-async function runTryOn({ modelImage, garmentImage, category }) {
-  // Submit job
+// ---------------------------------------------------------------------------
+// Mannequin image — the fixed neutral model every closet render uses.
+// Priority: MANNEQUIN_IMAGE_URL env var → backend/assets/mannequin.jpg.
+// Use a neck-down (head out of frame) full-body photo so closet cards read
+// as "the look", not "a person". See README for setup.
+// ---------------------------------------------------------------------------
+function getMannequinImage() {
+  if (process.env.MANNEQUIN_IMAGE_URL) return process.env.MANNEQUIN_IMAGE_URL;
+  const file = path.join(__dirname, 'assets', 'mannequin.jpg');
+  if (fs.existsSync(file)) {
+    const b64 = fs.readFileSync(file).toString('base64');
+    return `data:image/jpeg;base64,${b64}`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Generic FASHN runner: submit + poll until completed/failed/timeout.
+// ---------------------------------------------------------------------------
+async function runFashn(modelName, inputs, { maxWaitMs = 150_000 } = {}) {
   const { data: submit } = await fashn.post('/run', {
-    model_name: 'tryon-v1.6',
-    inputs: {
-      model_image: modelImage,
-      garment_image: garmentImage,
-      category: category || 'auto',
-      mode: 'quality',           // ← was 'balanced'. quality gives noticeably better results
-      garment_photo_type: 'auto',
-      num_samples: 2,            // ← return 2 variants so the user can pick the better one
-      segmentation_free: true,   // ← better preservation of skin/body when garment fits oddly
-      output_format: 'png',
-    },
+    model_name: modelName,
+    inputs,
   });
 
-  const predictionId = submit.id;
-  if (!predictionId) throw new Error('No prediction id from Fashn');
+  const id = submit.id;
+  if (!id) throw new Error(`No prediction id from FASHN (${modelName})`);
 
-  // Poll — quality mode + 2 samples can take 20-40s, so poll up to 60s
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+  const started = Date.now();
+  while (Date.now() - started < maxWaitMs) {
+    await new Promise((r) => setTimeout(r, 2500));
 
-    const { data: status } = await fashn.get(`/status/${predictionId}`);
+    const { data: status } = await fashn.get(`/status/${id}`);
 
     if (status.status === 'completed') {
       const urls = status.output || [];
@@ -60,34 +79,133 @@ async function runTryOn({ modelImage, garmentImage, category }) {
     }
 
     if (status.status === 'failed') {
-      throw new Error(status.error?.message || 'Fashn generation failed');
+      const err = new Error(status.error?.message || `FASHN ${modelName} failed`);
+      err.fashnName = status.error?.name;
+      throw err;
     }
-    // otherwise: starting / in_queue / processing — keep polling
+    // starting / in_queue / processing → keep polling
   }
 
   throw new Error('Generation timed out');
 }
 
+const asDataUri = (b64) =>
+  b64.startsWith('data:') ? b64 : `data:image/jpeg;base64,${b64}`;
+
 // --- Routes -----------------------------------------------------------------
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/health', (_, res) =>
+  res.json({ ok: true, mannequinConfigured: !!getMannequinImage() })
+);
 
+// Personal render: the user's body photo + a garment.
+// tryon-max · quality · 2 variants → 6 credits per look.
 app.post('/api/tryon', async (req, res) => {
-  const { personImage, garmentImage, category } = req.body;
-
+  const { personImage, garmentImage } = req.body;
   if (!personImage || !garmentImage) {
     return res.status(400).json({ error: 'Both images required' });
   }
 
   try {
-    const imageUrls = await runTryOn({
-      modelImage: `data:image/jpeg;base64,${personImage}`,
-      garmentImage: `data:image/jpeg;base64,${garmentImage}`,
-      category,
+    const imageUrls = await runFashn('tryon-max', {
+      model_image: asDataUri(personImage),
+      product_image: asDataUri(garmentImage),
+      generation_mode: 'quality',
+      resolution: '1k',
+      num_images: 2,
+      output_format: 'jpeg',
     });
     res.json({ imageUrls });
   } catch (err) {
-    console.error('try-on error:', err.message);
+    console.error('tryon error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Face fallback: no body photo saved yet — generate an AI model wearing the
+// garment, guided by the user's face. product-to-model + face_reference.
+app.post('/api/face-tryon', async (req, res) => {
+  const { faceImage, garmentImage } = req.body;
+  if (!faceImage || !garmentImage) {
+    return res.status(400).json({ error: 'Face and garment images required' });
+  }
+
+  try {
+    const imageUrls = await runFashn('product-to-model', {
+      product_image: asDataUri(garmentImage),
+      face_reference: asDataUri(faceImage),
+      face_reference_mode: 'match_reference',
+      aspect_ratio: '2:3',
+      generation_mode: 'balanced',
+      resolution: '1k',
+      num_images: 1,
+      output_format: 'jpeg',
+    });
+    res.json({ imageUrls });
+  } catch (err) {
+    console.error('face-tryon error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Catalog render: garment on the fixed neutral mannequin model.
+// Fired in the background after every successful generation so the closet
+// grid stays visually uniform. tryon-max · balanced · 1 image → 2 credits.
+app.post('/api/mannequin', async (req, res) => {
+  const { garmentImage } = req.body;
+  if (!garmentImage) {
+    return res.status(400).json({ error: 'Garment image required' });
+  }
+
+  const mannequin = getMannequinImage();
+  if (!mannequin) {
+    return res.status(503).json({
+      error:
+        'No mannequin image configured. Set MANNEQUIN_IMAGE_URL or add backend/assets/mannequin.jpg',
+    });
+  }
+
+  try {
+    const imageUrls = await runFashn('tryon-max', {
+      model_image: mannequin,
+      product_image: asDataUri(garmentImage),
+      generation_mode: 'balanced',
+      resolution: '1k',
+      num_images: 1,
+      output_format: 'jpeg',
+    });
+    res.json({ imageUrl: imageUrls[0] });
+  } catch (err) {
+    console.error('mannequin error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// One-time body-photo normalization: reframe to 2:3 portrait so awkward
+// real-world selfie crops don't degrade every future try-on.
+// If the photo already fits 2:3 FASHN rejects the job — that's success for us.
+app.post('/api/model-photo', async (req, res) => {
+  const { image } = req.body;
+  if (!image) return res.status(400).json({ error: 'Image required' });
+
+  try {
+    const imageUrls = await runFashn('reframe', {
+      image: asDataUri(image),
+      aspect_ratio: '2:3',
+      generation_mode: 'balanced',
+      resolution: '1k',
+      num_images: 1,
+      output_format: 'jpeg',
+    });
+    res.json({ imageUrl: imageUrls[0], reframed: true });
+  } catch (err) {
+    // "Image already matches target aspect ratio" → keep the original
+    const already =
+      err.fashnName === 'InputValidationError' ||
+      /aspect ratio/i.test(err.message || '');
+    if (already) return res.json({ imageUrl: null, reframed: false });
+
+    console.error('model-photo error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

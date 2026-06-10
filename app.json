@@ -1,4 +1,3 @@
-// app.json — replace apiUrl with your deployed backend URL before testing
 {
   "expo": {
     "name": "Wardrobe",
@@ -24,7 +23,7 @@
       ]
     ],
     "extra": {
-      "apiUrl": "http://localhost:3000"
+      "apiUrl": "https://wardrobe-backend-production-ae84.up.railway.app"
     }
   }
 }
