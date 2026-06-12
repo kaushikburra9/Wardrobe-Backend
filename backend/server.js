@@ -112,7 +112,7 @@ app.post('/api/tryon', async (req, res) => {
       product_image: asDataUri(garmentImage),
       generation_mode: 'quality',
       resolution: '1k',
-      num_images: 2,
+      num_images: 1,
       output_format: 'jpeg',
     });
     res.json({ imageUrls });
