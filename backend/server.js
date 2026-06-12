@@ -210,5 +210,61 @@ app.post('/api/model-photo', async (req, res) => {
   }
 });
 
+// Outfit: chain try-ons — apply the first garment to the model, then apply
+// the second garment to that result. Two sequential generations (~6 credits).
+// Accepts personImage (body pipeline) OR faceImage (face fallback pipeline).
+app.post('/api/outfit', async (req, res) => {
+  const { personImage, faceImage, garments } = req.body;
+  if (!Array.isArray(garments) || garments.length < 1) {
+    return res.status(400).json({ error: 'At least one garment required' });
+  }
+  if (!personImage && !faceImage) {
+    return res.status(400).json({ error: 'personImage or faceImage required' });
+  }
+
+  try {
+    // Pass 1: first garment onto the model
+    let urls;
+    if (personImage) {
+      urls = await runFashn('tryon-max', {
+        model_image: asDataUri(personImage),
+        product_image: asDataUri(garments[0]),
+        generation_mode: 'quality',
+        resolution: '1k',
+        num_images: 1,
+        output_format: 'jpeg',
+      });
+    } else {
+      urls = await runFashn('product-to-model', {
+        product_image: asDataUri(garments[0]),
+        face_reference: asDataUri(faceImage),
+        face_reference_mode: 'match_reference',
+        aspect_ratio: '2:3',
+        generation_mode: 'balanced',
+        resolution: '1k',
+        num_images: 1,
+        output_format: 'jpeg',
+      });
+    }
+
+    // Pass 2+: each further garment onto the previous result (URL as model)
+    for (let i = 1; i < garments.length; i++) {
+      urls = await runFashn('tryon-max', {
+        model_image: urls[0],
+        product_image: asDataUri(garments[i]),
+        generation_mode: 'quality',
+        resolution: '1k',
+        num_images: 1,
+        output_format: 'jpeg',
+      });
+    }
+
+    res.json({ imageUrls: urls });
+  } catch (err) {
+    console.error('outfit error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Mira backend running on :${PORT}`));
