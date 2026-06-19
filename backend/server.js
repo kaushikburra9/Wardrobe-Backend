@@ -265,6 +265,6 @@ app.post('/api/outfit', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
+require('./stylist')(app);
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Mira backend running on :${PORT}`));
