@@ -99,7 +99,7 @@ app.get('/health', (_, res) =>
 );
 
 // Personal render: the user's body photo + a garment.
-// tryon-max · quality · 2 variants → 6 credits per look.
+// tryon-max · quality · 1 image → 3 credits per look.
 app.post('/api/tryon', async (req, res) => {
   const { personImage, garmentImage } = req.body;
   if (!personImage || !garmentImage) {
@@ -110,7 +110,7 @@ app.post('/api/tryon', async (req, res) => {
     const imageUrls = await runFashn('tryon-max', {
       model_image: asDataUri(personImage),
       product_image: asDataUri(garmentImage),
-      generation_mode: 'quality',
+      generation_mode: 'balanced',
       resolution: '1k',
       num_images: 1,
       output_format: 'jpeg',
@@ -229,7 +229,7 @@ app.post('/api/outfit', async (req, res) => {
       urls = await runFashn('tryon-max', {
         model_image: asDataUri(personImage),
         product_image: asDataUri(garments[0]),
-        generation_mode: 'quality',
+        generation_mode: 'balanced',
         resolution: '1k',
         num_images: 1,
         output_format: 'jpeg',
@@ -252,7 +252,7 @@ app.post('/api/outfit', async (req, res) => {
       urls = await runFashn('tryon-max', {
         model_image: urls[0],
         product_image: asDataUri(garments[i]),
-        generation_mode: 'quality',
+        generation_mode: 'balanced',
         resolution: '1k',
         num_images: 1,
         output_format: 'jpeg',
@@ -265,6 +265,6 @@ app.post('/api/outfit', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-require('./stylist')(app);
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Mira backend running on :${PORT}`));
